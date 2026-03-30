@@ -41,9 +41,23 @@ Set these in Vercel Project Settings -> Environment Variables:
 - `SEND_HOUR_UTC` - **optional**; only for **hourly** (or frequent) crons — restrict sends to this UTC hour (0–23). Omit for **daily** cron.
 - `CRON_SECRET` - shared secret for cron endpoint authorization
 - `RESEND_API_KEY` - Resend API key
-- `KV_REST_API_URL` - Vercel KV REST URL
-- `KV_REST_API_TOKEN` - Vercel KV REST token
+- **Redis (pick one naming set — the app accepts both):**
+  - `KV_REST_API_URL` + `KV_REST_API_TOKEN` (legacy Vercel KV naming), or
+  - `UPSTASH_REDIS_REST_URL` + `UPSTASH_REDIS_REST_TOKEN` (common for [Marketplace Upstash](https://vercel.com/marketplace/upstash))
 - `SUBSCRIBE_SECRET` - optional shared password required to submit the signup form
+
+## Add Redis so “Add email” works
+
+Standalone **Vercel KV** was replaced by **Marketplace Redis** (usually **Upstash**). Your app needs the REST URL + token on the project.
+
+1. Open [Vercel Dashboard](https://vercel.com/dashboard) → select **this project** (`usa_volleyball_event_scraper` / your production deployment).
+2. Go to the **Storage** tab, or **Integrations** → search **Upstash** → **Upstash for Redis** ([Marketplace](https://vercel.com/marketplace/upstash)).
+3. **Create** a Redis database (free tier is fine) and **connect / link** it to **this** Vercel project when prompted. That injects env vars into the project (often `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN`).
+4. Under **Settings → Environment Variables**, confirm those variables exist for **Production** (and Preview if you use it).
+5. **Redeploy** (Deployments → ⋮ on latest → **Redeploy**, or push an empty commit). New env vars apply only after a new deployment.
+6. Reload your site’s `/` — the red “Redis is not linked” message should disappear and **Add** should persist new addresses.
+
+More context: [Redis on Vercel](https://vercel.com/docs/storage/vercel-kv/usage-and-pricing) (KV → Upstash migration).
 
 ## Resend quick setup (recommended)
 
@@ -60,8 +74,7 @@ Set these in Vercel Project Settings -> Environment Variables:
    - `EMAIL_FROM=<verified sender>`
    - `REMINDER_EMAILS=skylerkaufman@gmail.com`
    - `CRON_SECRET=<random secret>`
-   - `KV_REST_API_URL=<from Vercel KV integration>`
-   - `KV_REST_API_TOKEN=<from Vercel KV integration>`
+   - Redis vars from Marketplace (see **Add Redis** above) — usually `UPSTASH_REDIS_REST_*`
 
 ## Local run
 
@@ -74,8 +87,8 @@ export RESEND_API_KEY="re_your_api_key_here"
 export EMAIL_FROM="USAV Alerts <onboarding@resend.dev>"
 export REMINDER_EMAILS="skylerkaufman@gmail.com"
 export CRON_SECRET=your-secret
-export KV_REST_API_URL="..."
-export KV_REST_API_TOKEN="..."
+export UPSTASH_REDIS_REST_URL="https://....upstash.io"
+export UPSTASH_REDIS_REST_TOKEN="..."
 FLASK_APP=api/index.py flask run
 ```
 
@@ -93,7 +106,7 @@ Test:
 5. **Root directory:** leave blank unless this app lives in a subfolder of a monorepo.
 6. Framework: Vercel usually auto-detects **Flask** from `requirements.txt`. **Other** is also fine as long as the repo root contains `api/index.py` and `vercel.json`.
 7. Add the environment variables listed above.
-8. In Vercel, add Redis/KV via Marketplace (Upstash) and attach it so `KV_REST_API_*` is injected.
+8. Add Redis via Marketplace (see **Add Redis so “Add email” works** above), then redeploy.
 9. Deploy (or push a commit; Git integration redeploys automatically).
 10. After deploy, verify:
    - `GET /` renders the admin page

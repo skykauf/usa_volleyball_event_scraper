@@ -45,19 +45,31 @@ def parse_recipient_emails(raw: str) -> list[str]:
     return emails
 
 
+def kv_rest_credentials() -> tuple[str, str] | None:
+    """Vercel Marketplace Upstash may inject UPSTASH_*; legacy KV uses KV_REST_*."""
+    url = (os.getenv("KV_REST_API_URL") or os.getenv("UPSTASH_REDIS_REST_URL") or "").strip()
+    token = (os.getenv("KV_REST_API_TOKEN") or os.getenv("UPSTASH_REDIS_REST_TOKEN") or "").strip()
+    if url and token:
+        return url, token
+    return None
+
+
 def kv_enabled() -> bool:
-    return bool(os.getenv("KV_REST_API_URL")) and bool(os.getenv("KV_REST_API_TOKEN"))
+    return kv_rest_credentials() is not None
 
 
 def kv_request(command: list[str]) -> list | str | int | None:
-    if not kv_enabled():
+    creds = kv_rest_credentials()
+    if not creds:
         raise RuntimeError(
-            "Missing KV_REST_API_URL / KV_REST_API_TOKEN. Configure Vercel KV first."
+            "Redis/KV is not configured. Add Upstash Redis from the Vercel Marketplace "
+            "and link it to this project (or set KV_REST_API_* / UPSTASH_REDIS_REST_*)."
         )
+    url, token = creds
     response = requests.post(
-        get_env("KV_REST_API_URL"),
+        url,
         headers={
-            "Authorization": f"Bearer {get_env('KV_REST_API_TOKEN')}",
+            "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
         },
         data=json.dumps(command),
@@ -267,7 +279,7 @@ def home():
             <button type="submit">Add</button>
           </form>
           {% if not kv_enabled %}
-            <p class="err">Vercel KV is not configured. Adds are disabled until KV env vars are set.</p>
+            <p class="err">Redis is not linked. Add Upstash Redis from the Vercel Marketplace and redeploy, or set KV_REST_* / UPSTASH_REDIS_REST_* env vars.</p>
           {% endif %}
         </div>
 
@@ -305,7 +317,7 @@ def subscribe():
     if subscribe_secret and request.form.get("subscribe_secret", "") != subscribe_secret:
         return redirect(url_for("home", error="Invalid access code."))
     if not kv_enabled():
-        return redirect(url_for("home", error="Vercel KV is not configured yet."))
+        return redirect(url_for("home", error="Redis is not configured yet. Link Upstash in Vercel and redeploy."))
     try:
         add_email_to_distribution_list(email)
     except Exception as exc:
