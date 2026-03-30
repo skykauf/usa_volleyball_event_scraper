@@ -204,6 +204,15 @@ def parse_event_deadlines(page_text: str) -> list[EventDeadline]:
     return sorted(deduped.values(), key=lambda event: event.registration_deadline)
 
 
+def filter_upcoming_events(
+    events: list[EventDeadline], as_of: datetime | None = None
+) -> list[EventDeadline]:
+    """Registration deadline on or after as_of date (UTC). Sorted by deadline."""
+    when = (as_of or datetime.now(UTC)).date()
+    upcoming = [e for e in events if e.registration_deadline.date() >= when]
+    return sorted(upcoming, key=lambda e: e.registration_deadline)
+
+
 def events_requiring_reminder(
     events: Iterable[EventDeadline], now: datetime
 ) -> list[EventDeadline]:
@@ -250,7 +259,7 @@ def send_email(recipients: list[str], events: list[EventDeadline]) -> dict:
     # Default to Resend's onboarding test sender if EMAIL_FROM isn't set.
     # For production, set EMAIL_FROM to a verified sender/domain in Resend.
     from_email = os.getenv("EMAIL_FROM", "USAV Alerts <onboarding@resend.dev>")
-    subject = f"USAV registration reminder ({len(events)} events due soon)"
+    subject = f"USAV registration reminder ({len(events)} upcoming tournament(s))"
     html_body = format_email_html(events)
     resend_api_key = get_env("RESEND_API_KEY")
     payload = {
@@ -285,20 +294,34 @@ def send_email(recipients: list[str], events: list[EventDeadline]) -> dict:
         return {"provider": "resend", "response_text": (response.text or "").strip()}
 
 
-def get_preview_events() -> list[EventDeadline]:
+def _preview_html_and_events() -> tuple[str, list[EventDeadline]]:
+    """Admin preview + test-send payload: all tournaments with registration deadline >= today (UTC)."""
     page_text = fetch_event_page_text()
     events = parse_event_deadlines(page_text)
-    now = datetime.now(UTC).date()
-    upcoming = [event for event in events if event.registration_deadline.date() >= now]
-    preview_events = upcoming[:1] if upcoming else events[:1]
-    return preview_events
+    upcoming = filter_upcoming_events(events)
+    if not events:
+        return "<p>No events found on the source page.</p>", []
+    if not upcoming:
+        return (
+            "<p>No upcoming registration deadlines (all parsed deadlines are in the past).</p>",
+            [],
+        )
+    intro = (
+        f'<p style="margin:0 0 0.75rem;color:#444;">'
+        f"{len(upcoming)} upcoming tournament(s) — deadlines on or after today (UTC), "
+        f"sorted by deadline.</p>"
+    )
+    return intro + format_email_html(upcoming), upcoming
+
+
+def get_preview_events() -> list[EventDeadline]:
+    _, email_events = _preview_html_and_events()
+    return email_events
 
 
 def latest_event_email_preview() -> str:
-    preview_events = get_preview_events()
-    if not preview_events:
-        return "<p>No events found on the source page.</p>"
-    return format_email_html(preview_events)
+    html, _ = _preview_html_and_events()
+    return html
 
 
 @app.get("/")
@@ -365,7 +388,7 @@ def home():
         </div>
 
         <div class="card">
-          <h2>Most recent event email preview</h2>
+          <h2>Email preview (all upcoming deadlines)</h2>
           {{ preview_html|safe }}
           <form id="send-preview-form" method="post" action="{{ url_for('send_preview_email') }}">
             {% if subscribe_secret_required %}
@@ -483,9 +506,19 @@ def send_preview_email():
             return jsonify({"ok": False, "error": message}), 500
         return redirect(url_for("home", error=message))
 
-    message = f"Sent preview email to {len(recipients)} recipient(s)."
+    message = (
+        f"Sent preview ({len(preview_events)} upcoming tournament(s)) to "
+        f"{len(recipients)} recipient(s)."
+    )
     if wants_json:
-        return jsonify({"ok": True, "message": message, "recipient_count": len(recipients)})
+        return jsonify(
+            {
+                "ok": True,
+                "message": message,
+                "recipient_count": len(recipients),
+                "upcoming_count": len(preview_events),
+            }
+        )
     return redirect(url_for("home", success=message))
 
 
@@ -505,9 +538,9 @@ def run_cron():
     now = datetime.now(UTC)
     page_text = fetch_event_page_text()
     parsed_events = parse_event_deadlines(page_text)
-    reminder_events = events_requiring_reminder(parsed_events, now)
+    reminder_triggers = events_requiring_reminder(parsed_events, now)
 
-    if not reminder_events:
+    if not reminder_triggers:
         return jsonify(
             {
                 "ok": True,
@@ -519,20 +552,38 @@ def run_cron():
             }
         )
 
+    upcoming = filter_upcoming_events(parsed_events, now)
+    if not upcoming:
+        return jsonify(
+            {
+                "ok": True,
+                "sent": False,
+                "reason": "Reminder triggered but no upcoming deadlines to include in email",
+                "reminder_triggers": [
+                    {
+                        "event_name": e.event_name,
+                        "deadline": e.registration_deadline.date().isoformat(),
+                    }
+                    for e in reminder_triggers
+                ],
+            }
+        )
+
     recipients = load_distribution_list()
-    email_result = send_email(recipients, reminder_events)
+    email_result = send_email(recipients, upcoming)
     return jsonify(
         {
             "ok": True,
             "sent": True,
             "recipient_count": len(recipients),
-            "events_reminded": [
+            "reminder_triggers": [
                 {
-                    "event_name": event.event_name,
-                    "deadline": event.registration_deadline.date().isoformat(),
+                    "event_name": e.event_name,
+                    "deadline": e.registration_deadline.date().isoformat(),
                 }
-                for event in reminder_events
+                for e in reminder_triggers
             ],
+            "upcoming_count_in_email": len(upcoming),
             "email_result": email_result,
         }
     )
