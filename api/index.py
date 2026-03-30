@@ -1,3 +1,4 @@
+import html
 import json
 import os
 import re
@@ -9,7 +10,7 @@ from typing import Iterable
 import requests
 from bs4 import BeautifulSoup
 from dateutil import parser as date_parser
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, redirect, render_template_string, request, url_for
 
 USAV_EVENTS_URL = "https://usavolleyball.org/beach-national-team/event-registration/"
 
@@ -23,6 +24,7 @@ class EventDeadline:
 
 
 app = Flask(__name__)
+KV_EMAIL_SET_KEY = "usav:reminder_emails"
 
 
 def get_env(name: str, default: str | None = None) -> str:
@@ -41,6 +43,51 @@ def parse_recipient_emails(raw: str) -> list[str]:
     if not emails:
         raise RuntimeError("No valid recipient emails found in REMINDER_EMAILS")
     return emails
+
+
+def kv_enabled() -> bool:
+    return bool(os.getenv("KV_REST_API_URL")) and bool(os.getenv("KV_REST_API_TOKEN"))
+
+
+def kv_request(command: list[str]) -> list | str | int | None:
+    if not kv_enabled():
+        raise RuntimeError(
+            "Missing KV_REST_API_URL / KV_REST_API_TOKEN. Configure Vercel KV first."
+        )
+    response = requests.post(
+        get_env("KV_REST_API_URL"),
+        headers={
+            "Authorization": f"Bearer {get_env('KV_REST_API_TOKEN')}",
+            "Content-Type": "application/json",
+        },
+        data=json.dumps(command),
+        timeout=30,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if "error" in payload:
+        raise RuntimeError(payload["error"])
+    return payload.get("result")
+
+
+def load_distribution_list() -> list[str]:
+    from_env = parse_recipient_emails(
+        os.getenv("REMINDER_EMAILS", "skylerkaufman@gmail.com")
+    )
+    if not kv_enabled():
+        return sorted(set(from_env))
+
+    from_kv = kv_request(["SMEMBERS", KV_EMAIL_SET_KEY]) or []
+    combined = {parseaddr(email)[1] for email in from_kv if parseaddr(email)[1]}
+    combined.update(from_env)
+    return sorted(combined)
+
+
+def add_email_to_distribution_list(email: str) -> None:
+    normalized = parseaddr(email.strip())[1]
+    if not normalized:
+        raise RuntimeError("Please provide a valid email address.")
+    kv_request(["SADD", KV_EMAIL_SET_KEY, normalized])
 
 
 def extract_year(text: str, fallback_year: int) -> int:
@@ -122,8 +169,8 @@ def format_email_html(events: list[EventDeadline]) -> str:
     rows = []
     for event in events:
         rows.append(
-            f"<li><strong>{event.event_name}</strong><br>"
-            f"Event dates: {event.event_dates_raw}<br>"
+            f"<li><strong>{html.escape(event.event_name)}</strong><br>"
+            f"Event dates: {html.escape(event.event_dates_raw)}<br>"
             f"Registration deadline: {event.registration_deadline.date().isoformat()}</li>"
         )
     return (
@@ -136,14 +183,15 @@ def format_email_html(events: list[EventDeadline]) -> str:
 
 
 def send_email(recipients: list[str], events: list[EventDeadline]) -> dict:
-    resend_api_key = get_env("RESEND_API_KEY")
     from_email = get_env("EMAIL_FROM")
-
+    subject = f"USAV registration reminder ({len(events)} events due soon)"
+    html_body = format_email_html(events)
+    resend_api_key = get_env("RESEND_API_KEY")
     payload = {
         "from": from_email,
         "to": recipients,
-        "subject": f"USAV registration reminder ({len(events)} events due soon)",
-        "html": format_email_html(events),
+        "subject": subject,
+        "html": html_body,
     }
     response = requests.post(
         "https://api.resend.com/emails",
@@ -155,7 +203,105 @@ def send_email(recipients: list[str], events: list[EventDeadline]) -> dict:
         timeout=30,
     )
     response.raise_for_status()
-    return response.json()
+    return {"provider": "resend", "response": response.json()}
+
+
+def latest_event_email_preview() -> str:
+    page_text = fetch_event_page_text()
+    events = parse_event_deadlines(page_text)
+    now = datetime.now(UTC).date()
+    upcoming = [event for event in events if event.registration_deadline.date() >= now]
+    preview_events = upcoming[:1] if upcoming else events[:1]
+    if not preview_events:
+        return "<p>No events found on the source page.</p>"
+    return format_email_html(preview_events)
+
+
+@app.get("/")
+def home():
+    error = request.args.get("error")
+    success = request.args.get("success")
+    recipients = load_distribution_list()
+    preview_html = latest_event_email_preview()
+    subscribe_secret_required = bool(os.getenv("SUBSCRIBE_SECRET"))
+    html = """
+    <!doctype html>
+    <html>
+      <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>USAV Reminder Admin</title>
+        <style>
+          body { font-family: Arial, sans-serif; margin: 2rem auto; max-width: 760px; line-height: 1.5; padding: 0 1rem; }
+          h1, h2 { margin-bottom: 0.5rem; }
+          form { display: flex; gap: 0.5rem; margin: 1rem 0; }
+          input[type="email"] { flex: 1; padding: 0.6rem; }
+          button { padding: 0.6rem 0.9rem; cursor: pointer; }
+          .card { border: 1px solid #ddd; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }
+          .ok { color: #065f46; }
+          .err { color: #991b1b; }
+        </style>
+      </head>
+      <body>
+        <h1>USA Volleyball Reminder Admin</h1>
+        <p>Manage the reminder distribution list and preview the current email content.</p>
+        {% if success %}<p class="ok">{{ success }}</p>{% endif %}
+        {% if error %}<p class="err">{{ error }}</p>{% endif %}
+
+        <div class="card">
+          <h2>Add email address</h2>
+          <form method="post" action="{{ url_for('subscribe') }}">
+            <input type="email" name="email" placeholder="name@example.com" required />
+            {% if subscribe_secret_required %}
+              <input type="password" name="subscribe_secret" placeholder="Access code" required />
+            {% endif %}
+            <button type="submit">Add</button>
+          </form>
+          {% if not kv_enabled %}
+            <p class="err">Vercel KV is not configured. Adds are disabled until KV env vars are set.</p>
+          {% endif %}
+        </div>
+
+        <div class="card">
+          <h2>Current distribution list</h2>
+          <ul>
+            {% for email in recipients %}
+              <li>{{ email }}</li>
+            {% endfor %}
+          </ul>
+        </div>
+
+        <div class="card">
+          <h2>Most recent event email preview</h2>
+          {{ preview_html|safe }}
+        </div>
+      </body>
+    </html>
+    """
+    return render_template_string(
+        html,
+        error=error,
+        success=success,
+        recipients=recipients,
+        preview_html=preview_html,
+        kv_enabled=kv_enabled(),
+        subscribe_secret_required=subscribe_secret_required,
+    )
+
+
+@app.post("/subscribe")
+def subscribe():
+    email = request.form.get("email", "").strip()
+    subscribe_secret = os.getenv("SUBSCRIBE_SECRET")
+    if subscribe_secret and request.form.get("subscribe_secret", "") != subscribe_secret:
+        return redirect(url_for("home", error="Invalid access code."))
+    if not kv_enabled():
+        return redirect(url_for("home", error="Vercel KV is not configured yet."))
+    try:
+        add_email_to_distribution_list(email)
+    except Exception as exc:
+        return redirect(url_for("home", error=str(exc)))
+    return redirect(url_for("home", success=f"Added {email}"))
 
 
 @app.get("/api/health")
@@ -187,9 +333,7 @@ def run_cron():
             }
         )
 
-    recipients = parse_recipient_emails(
-        os.getenv("REMINDER_EMAILS", "skylerkaufman@gmail.com")
-    )
+    recipients = load_distribution_list()
     email_result = send_email(recipients, reminder_events)
     return jsonify(
         {
