@@ -303,13 +303,50 @@ def home():
         <div class="card">
           <h2>Most recent event email preview</h2>
           {{ preview_html|safe }}
-          <form method="post" action="{{ url_for('send_preview_email') }}">
+          <form id="send-preview-form" method="post" action="{{ url_for('send_preview_email') }}">
             {% if subscribe_secret_required %}
               <input type="password" name="subscribe_secret" placeholder="Access code" required />
             {% endif %}
             <button type="submit" style="margin-top:0.75rem;">Send this preview</button>
           </form>
+          <div id="send-preview-status" style="margin-top:0.75rem; min-height:1.2em;"></div>
         </div>
+
+        <script>
+          (function() {
+            const form = document.getElementById('send-preview-form');
+            const status = document.getElementById('send-preview-status');
+            if (!form || !status) return;
+            form.addEventListener('submit', async (e) => {
+              e.preventDefault();
+              const btn = form.querySelector('button[type="submit"]');
+              if (btn) btn.disabled = true;
+              status.className = '';
+              status.style.color = '';
+              status.textContent = 'Sending...';
+              try {
+                const res = await fetch(form.action, {
+                  method: 'POST',
+                  headers: { 'Accept': 'application/json' },
+                  body: new FormData(form)
+                });
+                const data = await res.json().catch(() => ({}));
+                if (res.ok && data.ok) {
+                  status.style.color = '#065f46';
+                  status.textContent = data.message || 'Sent.';
+                } else {
+                  status.style.color = '#991b1b';
+                  status.textContent = data.error || data.message || 'Send failed.';
+                }
+              } catch (err) {
+                status.style.color = '#991b1b';
+                status.textContent = 'Send failed: ' + String(err);
+              } finally {
+                if (btn) btn.disabled = false;
+              }
+            });
+          })();
+        </script>
       </body>
     </html>
     """
@@ -353,12 +390,20 @@ def send_preview_email():
     if not recipients:
         return redirect(url_for("home", error="Distribution list is empty. Add an email first."))
 
+    wants_json = "application/json" in request.headers.get("Accept", "")
+
     try:
         send_email(recipients, preview_events)
     except Exception as exc:
-        return redirect(url_for("home", error=f"Send failed: {exc}"))
+        message = f"Send failed: {exc}"
+        if wants_json:
+            return jsonify({"ok": False, "error": message}), 500
+        return redirect(url_for("home", error=message))
 
-    return redirect(url_for("home", success=f"Sent preview email to {len(recipients)} recipient(s)."))
+    message = f"Sent preview email to {len(recipients)} recipient(s)."
+    if wants_json:
+        return jsonify({"ok": True, "message": message, "recipient_count": len(recipients)})
+    return redirect(url_for("home", success=message))
 
 
 @app.get("/api/health")
