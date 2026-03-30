@@ -226,8 +226,21 @@ def send_email(recipients: list[str], events: list[EventDeadline]) -> dict:
         data=json.dumps(payload),
         timeout=30,
     )
-    response.raise_for_status()
-    return {"provider": "resend", "response": response.json()}
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as exc:
+        # Show Resend's actual response body to make debugging (403/etc.) easy.
+        try:
+            details = response.json()
+        except Exception:
+            details = (response.text or "").strip()
+        message = f"Resend error {response.status_code}: {details}"
+        raise RuntimeError(message) from None
+
+    try:
+        return {"provider": "resend", "response": response.json()}
+    except Exception:
+        return {"provider": "resend", "response_text": (response.text or "").strip()}
 
 
 def get_preview_events() -> list[EventDeadline]:
