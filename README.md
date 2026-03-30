@@ -28,7 +28,7 @@ Vercel links:
 ## Project structure
 
 - `api/index.py` Flask app with admin UI, cron endpoint, scraper, parser, and email sender
-- `vercel.json` hourly cron schedule
+- `vercel.json` rewrites (required for Flask on Vercel) + hourly cron schedule
 - `requirements.txt` Python dependencies
 
 ## Environment variables (Vercel)
@@ -91,14 +91,30 @@ Test:
 1. Push this repo to GitHub.
 2. In Vercel, click **Add New... -> Project**.
 3. Import the `usa_volleyball_event_scraper` GitHub repo.
-4. Framework preset can stay **Other**.
-5. Add the environment variables listed above.
-6. In Vercel, add a KV database and attach/integrate it with this project.
-7. Deploy.
-8. After deploy, verify:
+4. **Production branch:** ensure Vercel is connected to the branch you push (usually `main`) under Project → Settings → Git.
+5. **Root directory:** leave blank unless this app lives in a subfolder of a monorepo.
+6. Framework: Vercel usually auto-detects **Flask** from `requirements.txt`. **Other** is also fine as long as the repo root contains `api/index.py` and `vercel.json`.
+7. Add the environment variables listed above.
+8. In Vercel, add Redis/KV via Marketplace (Upstash) and attach it so `KV_REST_API_*` is injected.
+9. Deploy (or push a commit; Git integration redeploys automatically).
+10. After deploy, verify:
    - `GET /` renders the admin page
    - `GET /api/health` returns `ok: true`
-   - In Vercel, go to **Storage/Logs** and inspect a cron invocation.
+   - In Vercel, go to **Logs** and inspect a cron invocation.
+
+## Troubleshooting Vercel
+
+### `404` / `DEPLOYMENT_NOT_FOUND` on `*.vercel.app`
+
+That response means **there is no successful production deployment** for that project (or the URL points at a deleted/old deployment). It is not your Flask `404` page.
+
+1. Open the project on [Vercel Dashboard](https://vercel.com/dashboard) → **Deployments**.
+2. If the list is empty or every deploy is **Error** / **Canceled**:
+   - Confirm the GitHub repo has commits on the branch Vercel uses (e.g. `main`).
+   - Open the latest deployment → **Building** / **Runtime Logs** and fix the reported error (missing files, build timeout, etc.).
+3. If deploys succeed but the site 404s on `/`:
+   - This repo includes a rewrite so all paths go to the Flask app (`vercel.json` → `destination: /api/index`), matching the [official Flask on Vercel example](https://github.com/vercel/examples/tree/main/python/flask3). Ensure you deployed a revision that contains that `vercel.json`.
+4. After a green deployment, open the deployment’s **Visit** link, or set **Production Branch** and use the production domain shown under **Settings → Domains**.
 
 ## Notes
 
