@@ -139,17 +139,41 @@ def parse_event_deadlines(page_text: str) -> list[EventDeadline]:
     lines = [line.strip() for line in page_text.splitlines() if line.strip()]
     events: list[EventDeadline] = []
     now = datetime.now(UTC)
+    # Lines between title and "Registration Deadline:" for NORCECA-style blocks.
+    meta_prefixes = ("Date:", "Location:", "NORCECA Events:")
 
     for idx, line in enumerate(lines):
         if not line.startswith("Registration Deadline:"):
             continue
-        if idx < 2:
+        if idx < 1:
             continue
 
         deadline_label = line.split("Registration Deadline:", 1)[1].strip()
-        event_dates_raw = lines[idx - 1]
-        event_name = lines[idx - 2]
-        year = extract_year(event_dates_raw, now.year)
+        line_above_deadline = lines[idx - 1]
+
+        # FIVB: "Event name" / "May 13-17, 2026" / "Registration Deadline: March 31"
+        # NORCECA: "NORCECA Playoff #2" / "Date: ..." / "Location: ..." / "Registration Deadline: ..."
+        if line_above_deadline.startswith(meta_prefixes):
+            j = idx - 1
+            detail_lines_rev: list[str] = []
+            while j >= 0:
+                prev = lines[j]
+                if prev.startswith(meta_prefixes):
+                    detail_lines_rev.append(prev)
+                    j -= 1
+                    continue
+                event_name = prev
+                break
+            else:
+                continue
+            event_dates_raw = " | ".join(reversed(detail_lines_rev))
+        else:
+            if idx < 2:
+                continue
+            event_name = lines[idx - 2]
+            event_dates_raw = line_above_deadline
+
+        year = extract_year(f"{event_dates_raw} {deadline_label}", now.year)
 
         try:
             parsed_deadline = date_parser.parse(
