@@ -15,15 +15,15 @@ Vercel links:
 
 ## How it works
 
-- Vercel Cron calls `GET /api/cron` **once per day** on the [Hobby plan](https://vercel.com/docs/cron-jobs/usage-and-pricing) (hourly schedules **fail deployment** on Hobby). This repo uses `0 14 * * *` (≈14:00 UTC daily) to match the default `SEND_HOUR_UTC=14`. If you change `SEND_HOUR_UTC`, update the cron expression in `vercel.json` to the same hour. On **Pro**, you can switch to hourly (e.g. `0 * * * *`) if you want.
+- **When jobs run:** set the time in **`vercel.json`** only (`crons[].schedule`). This repo uses `0 14 * * *` (≈once per day around 14:00 UTC) so it stays within [Hobby cron limits](https://vercel.com/docs/cron-jobs/usage-and-pricing). You do **not** need a matching `SEND_HOUR_UTC` for that.
+- **Optional `SEND_HOUR_UTC`:** use only if your cron runs **more than once per day** (e.g. Pro + hourly `0 * * * *`). Then set `SEND_HOUR_UTC` to a single UTC hour (0–23) so emails only send during that hour; leave it **unset** for daily cron.
 - The app scrapes event/deadline text from the source page.
 - Web UI at `GET /` lets users add addresses to the distribution list.
 - Email addresses are persisted in Vercel KV (Redis).
 - It sends reminder emails only when:
-  - current UTC hour equals `SEND_HOUR_UTC` (default `14`)
+  - (if `SEND_HOUR_UTC` is set) current UTC hour equals that value
   - event registration deadline is in the future or today
   - days remaining until deadline is divisible by `3`
-- With a **daily** cron at the same hour as `SEND_HOUR_UTC`, you still get at most one real send check per day; the “every 3 days before deadline” logic is unchanged.
 
 ## Project structure
 
@@ -38,7 +38,7 @@ Set these in Vercel Project Settings -> Environment Variables:
 - `EMAIL_FROM` - verified sender (e.g. `USAV Alerts <alerts@yourdomain.com>`)
 - `REMINDER_EMAILS` - comma-separated list of recipients
   - seed/default list if KV is empty or unavailable
-- `SEND_HOUR_UTC` - hour 0-23 when emails can be sent (default `14`)
+- `SEND_HOUR_UTC` - **optional**; only for **hourly** (or frequent) crons — restrict sends to this UTC hour (0–23). Omit for **daily** cron.
 - `CRON_SECRET` - shared secret for cron endpoint authorization
 - `RESEND_API_KEY` - Resend API key
 - `KV_REST_API_URL` - Vercel KV REST URL
@@ -59,7 +59,6 @@ Set these in Vercel Project Settings -> Environment Variables:
    - `RESEND_API_KEY=<your key>`
    - `EMAIL_FROM=<verified sender>`
    - `REMINDER_EMAILS=skylerkaufman@gmail.com`
-   - `SEND_HOUR_UTC=14`
    - `CRON_SECRET=<random secret>`
    - `KV_REST_API_URL=<from Vercel KV integration>`
    - `KV_REST_API_TOKEN=<from Vercel KV integration>`
@@ -74,7 +73,6 @@ cp .env.example .env
 export RESEND_API_KEY="re_your_api_key_here"
 export EMAIL_FROM="USAV Alerts <onboarding@resend.dev>"
 export REMINDER_EMAILS="skylerkaufman@gmail.com"
-export SEND_HOUR_UTC=14
 export CRON_SECRET=your-secret
 export KV_REST_API_URL="..."
 export KV_REST_API_TOKEN="..."
