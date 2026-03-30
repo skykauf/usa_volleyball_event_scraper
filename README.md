@@ -104,7 +104,7 @@ Test:
 
 ### Deploy fails: “Hobby accounts are limited to daily cron jobs”
 
-On Hobby, cron expressions that run **more than once per day** are rejected at deploy time. See [Vercel cron usage & pricing](https://vercel.com/docs/cron-jobs/usage-and-pricing). This repo uses a **daily** cron aligned with `SEND_HOUR_UTC`. Do not set `0 * * * *` unless the project is on **Pro**.
+On Hobby, cron expressions that run **more than once per day** are rejected at deploy time. See [Vercel cron usage & pricing](https://vercel.com/docs/cron-jobs/usage-and-pricing). This repo uses a **daily** cron in `vercel.json`. Do not set `0 * * * *` unless the project is on **Pro** (and if you do, set `SEND_HOUR_UTC` so only one hour sends).
 
 ### `404` / `DEPLOYMENT_NOT_FOUND` on `*.vercel.app`
 
