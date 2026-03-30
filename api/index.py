@@ -333,8 +333,7 @@ def _preview_html_and_events() -> tuple[str, list[EventDeadline]]:
         )
     intro = (
         f'<p style="margin:0 0 0.75rem;color:#444;">'
-        f"{len(in_window)} tournament(s) with deadlines in the next {n} day window "
-        f"(today through today+{n} calendar days, UTC), sorted by deadline.</p>"
+        f"{len(in_window)} tournament(s) with upcoming deadlines</p>"
     )
     return intro + format_email_html(in_window), in_window
 
