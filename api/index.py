@@ -152,9 +152,18 @@ def parse_event_deadlines(page_text: str) -> list[EventDeadline]:
 def events_requiring_reminder(
     events: Iterable[EventDeadline], now: datetime
 ) -> list[EventDeadline]:
-    target_send_hour = int(os.getenv("SEND_HOUR_UTC", "14"))
-    if now.hour != target_send_hour:
-        return []
+    # Daily cron (Hobby): only `vercel.json` schedule matters — no env needed.
+    # Hourly cron (Pro): set SEND_HOUR_UTC=0-23 so only that UTC hour sends.
+    raw_hour = os.getenv("SEND_HOUR_UTC", "").strip()
+    if raw_hour:
+        try:
+            target = int(raw_hour)
+        except ValueError:
+            raise RuntimeError("SEND_HOUR_UTC must be an integer 0-23") from None
+        if not 0 <= target <= 23:
+            raise RuntimeError("SEND_HOUR_UTC must be between 0 and 23")
+        if now.hour != target:
+            return []
 
     due: list[EventDeadline] = []
     today = now.date()
@@ -329,7 +338,8 @@ def run_cron():
                 "sent": False,
                 "reason": "No events due for reminder at this hour",
                 "events_found": len(parsed_events),
-                "send_hour_utc": int(os.getenv("SEND_HOUR_UTC", "14")),
+                "send_hour_utc": os.getenv("SEND_HOUR_UTC", "").strip()
+                or None,
             }
         )
 
