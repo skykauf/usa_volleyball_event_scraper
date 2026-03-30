@@ -270,6 +270,8 @@ def format_email_html(events: list[EventDeadline]) -> str:
 
 
 def send_email(recipients: list[str], events: list[EventDeadline]) -> dict:
+    if not events:
+        raise RuntimeError("Refusing to send email with zero tournaments in the body.")
     # Default to Resend's onboarding test sender if EMAIL_FROM isn't set.
     # For production, set EMAIL_FROM to a verified sender/domain in Resend.
     from_email = os.getenv("EMAIL_FROM", "USAV Alerts <onboarding@resend.dev>")
@@ -318,11 +320,15 @@ def _preview_html_and_events() -> tuple[str, list[EventDeadline]]:
     n = deadline_window_days()
     in_window = filter_events_deadline_in_window(events)
     if not events:
-        return "<p>No events found on the source page.</p>", []
+        return (
+            '<p class="muted"><strong>No page data.</strong> Could not parse any events from the source.</p>',
+            [],
+        )
     if not in_window:
         return (
-            "<p>No registration deadlines in the next "
-            f"{n} day window (today through today+{n} calendar days, UTC).</p>",
+            '<p class="muted"><strong>Nothing coming up really soon.</strong> There are no registration '
+            f"deadlines in the next <strong>{n}</strong> calendar days (today through today+{n}, UTC). "
+            "No reminder email would be sent for this window.</p>",
             [],
         )
     intro = (
@@ -348,7 +354,8 @@ def home():
     error = request.args.get("error")
     success = request.args.get("success")
     recipients = load_distribution_list()
-    preview_html = latest_event_email_preview()
+    preview_html, preview_events = _preview_html_and_events()
+    preview_event_count = len(preview_events)
     subscribe_secret_required = bool(os.getenv("SUBSCRIBE_SECRET"))
     html = """
     <!doctype html>
@@ -366,6 +373,7 @@ def home():
           .card { border: 1px solid #ddd; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }
           .ok { color: #065f46; }
           .err { color: #991b1b; }
+          .muted { color: #555; background: #f6f6f6; padding: 0.75rem 1rem; border-radius: 6px; }
         </style>
       </head>
       <body>
@@ -413,8 +421,11 @@ def home():
             {% if subscribe_secret_required %}
               <input type="password" name="subscribe_secret" placeholder="Access code" required />
             {% endif %}
-            <button type="submit" style="margin-top:0.75rem;">Send this preview</button>
+            <button type="submit" style="margin-top:0.75rem;" {% if preview_event_count == 0 %}disabled title="Nothing in the deadline window to send"{% endif %}>Send this preview</button>
           </form>
+          {% if preview_event_count == 0 %}
+            <p class="muted" style="margin-top:0.5rem;">Send is disabled when there are no deadlines in the current window.</p>
+          {% endif %}
           <div id="send-preview-status" style="margin-top:0.75rem; min-height:1.2em;"></div>
         </div>
 
@@ -462,6 +473,7 @@ def home():
         success=success,
         recipients=recipients,
         preview_html=preview_html,
+        preview_event_count=preview_event_count,
         kv_enabled=kv_enabled(),
         subscribe_secret_required=subscribe_secret_required,
         deadline_window_days=deadline_window_days(),
@@ -504,19 +516,24 @@ def delete_email():
 
 @app.post("/send-preview")
 def send_preview_email():
+    wants_json = "application/json" in request.headers.get("Accept", "")
     subscribe_secret = os.getenv("SUBSCRIBE_SECRET")
     if subscribe_secret and request.form.get("subscribe_secret", "") != subscribe_secret:
         return redirect(url_for("home", error="Invalid access code."))
 
     preview_events = get_preview_events()
     if not preview_events:
-        return redirect(url_for("home", error="No preview events found on the source page."))
+        msg = (
+            f"Nothing to send: no registration deadlines in the next {deadline_window_days()} "
+            "calendar days (UTC)."
+        )
+        if wants_json:
+            return jsonify({"ok": False, "error": msg}), 400
+        return redirect(url_for("home", error=msg))
 
     recipients = load_distribution_list()
     if not recipients:
         return redirect(url_for("home", error="Distribution list is empty. Add an email first."))
-
-    wants_json = "application/json" in request.headers.get("Accept", "")
 
     try:
         send_email(recipients, preview_events)
@@ -558,6 +575,25 @@ def run_cron():
     now = datetime.now(UTC)
     page_text = fetch_event_page_text()
     parsed_events = parse_event_deadlines(page_text)
+    n = deadline_window_days()
+    in_window = filter_events_deadline_in_window(parsed_events, now)
+
+    if not in_window:
+        return jsonify(
+            {
+                "ok": True,
+                "sent": False,
+                "reason": (
+                    f"No registration deadlines in the next {n} calendar days (UTC); "
+                    "no email sent."
+                ),
+                "events_found": len(parsed_events),
+                "window_days": n,
+                "send_hour_utc": os.getenv("SEND_HOUR_UTC", "").strip()
+                or None,
+            }
+        )
+
     reminder_triggers = events_requiring_reminder(parsed_events, now)
 
     if not reminder_triggers:
@@ -567,30 +603,15 @@ def run_cron():
                 "sent": False,
                 "reason": "No events due for reminder at this hour",
                 "events_found": len(parsed_events),
+                "window_days": n,
+                "deadlines_in_window": len(in_window),
                 "send_hour_utc": os.getenv("SEND_HOUR_UTC", "").strip()
                 or None,
             }
         )
 
-    upcoming = filter_events_deadline_in_window(parsed_events, now)
-    if not upcoming:
-        return jsonify(
-            {
-                "ok": True,
-                "sent": False,
-                "reason": "Reminder triggered but no deadlines in the configured window to include",
-                "reminder_triggers": [
-                    {
-                        "event_name": e.event_name,
-                        "deadline": e.registration_deadline.date().isoformat(),
-                    }
-                    for e in reminder_triggers
-                ],
-            }
-        )
-
     recipients = load_distribution_list()
-    email_result = send_email(recipients, upcoming)
+    email_result = send_email(recipients, in_window)
     return jsonify(
         {
             "ok": True,
@@ -603,7 +624,7 @@ def run_cron():
                 }
                 for e in reminder_triggers
             ],
-            "upcoming_count_in_email": len(upcoming),
+            "upcoming_count_in_email": len(in_window),
             "email_result": email_result,
         }
     )
