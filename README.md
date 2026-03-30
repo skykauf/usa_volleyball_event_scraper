@@ -15,7 +15,7 @@ Vercel links:
 
 ## How it works
 
-- Vercel Cron calls `GET /api/cron` hourly.
+- Vercel Cron calls `GET /api/cron` **once per day** on the [Hobby plan](https://vercel.com/docs/cron-jobs/usage-and-pricing) (hourly schedules **fail deployment** on Hobby). This repo uses `0 14 * * *` (≈14:00 UTC daily) to match the default `SEND_HOUR_UTC=14`. If you change `SEND_HOUR_UTC`, update the cron expression in `vercel.json` to the same hour. On **Pro**, you can switch to hourly (e.g. `0 * * * *`) if you want.
 - The app scrapes event/deadline text from the source page.
 - Web UI at `GET /` lets users add addresses to the distribution list.
 - Email addresses are persisted in Vercel KV (Redis).
@@ -23,12 +23,12 @@ Vercel links:
   - current UTC hour equals `SEND_HOUR_UTC` (default `14`)
   - event registration deadline is in the future or today
   - days remaining until deadline is divisible by `3`
-- This avoids sending every hour while still checking hourly.
+- With a **daily** cron at the same hour as `SEND_HOUR_UTC`, you still get at most one real send check per day; the “every 3 days before deadline” logic is unchanged.
 
 ## Project structure
 
 - `api/index.py` Flask app with admin UI, cron endpoint, scraper, parser, and email sender
-- `vercel.json` rewrites (required for Flask on Vercel) + hourly cron schedule
+- `vercel.json` rewrites (required for Flask on Vercel) + daily cron schedule (Hobby-compatible)
 - `requirements.txt` Python dependencies
 
 ## Environment variables (Vercel)
@@ -104,6 +104,10 @@ Test:
 
 ## Troubleshooting Vercel
 
+### Deploy fails: “Hobby accounts are limited to daily cron jobs”
+
+On Hobby, cron expressions that run **more than once per day** are rejected at deploy time. See [Vercel cron usage & pricing](https://vercel.com/docs/cron-jobs/usage-and-pricing). This repo uses a **daily** cron aligned with `SEND_HOUR_UTC`. Do not set `0 * * * *` unless the project is on **Pro**.
+
 ### `404` / `DEPLOYMENT_NOT_FOUND` on `*.vercel.app`
 
 That response means **there is no successful production deployment** for that project (or the URL points at a deleted/old deployment). It is not your Flask `404` page.
@@ -118,7 +122,7 @@ That response means **there is no successful production deployment** for that pr
 
 ## Notes
 
-- Vercel cron triggers use UTC schedule.
+- Vercel cron schedules use **UTC**. Hobby invocations are “hour bucket” fuzzy (e.g. 14:00–14:59 for `0 14 * * *`); see [docs](https://vercel.com/docs/cron-jobs/usage-and-pricing).
 - The parser is text-based and resilient to most layout changes, but large upstream page format changes may require parser updates.
 - Email delivery is Resend-only in this project.
 - Without `SUBSCRIBE_SECRET`, anyone who can load `/` can add emails to your list. Set it for a simple gate.
