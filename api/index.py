@@ -204,7 +204,9 @@ def format_email_html(events: list[EventDeadline]) -> str:
 
 
 def send_email(recipients: list[str], events: list[EventDeadline]) -> dict:
-    from_email = get_env("EMAIL_FROM")
+    # Default to Resend's onboarding test sender if EMAIL_FROM isn't set.
+    # For production, set EMAIL_FROM to a verified sender/domain in Resend.
+    from_email = os.getenv("EMAIL_FROM", "USAV Alerts <onboarding@resend.dev>")
     subject = f"USAV registration reminder ({len(events)} events due soon)"
     html_body = format_email_html(events)
     resend_api_key = get_env("RESEND_API_KEY")
