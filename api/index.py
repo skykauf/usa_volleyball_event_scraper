@@ -230,12 +230,17 @@ def send_email(recipients: list[str], events: list[EventDeadline]) -> dict:
     return {"provider": "resend", "response": response.json()}
 
 
-def latest_event_email_preview() -> str:
+def get_preview_events() -> list[EventDeadline]:
     page_text = fetch_event_page_text()
     events = parse_event_deadlines(page_text)
     now = datetime.now(UTC).date()
     upcoming = [event for event in events if event.registration_deadline.date() >= now]
     preview_events = upcoming[:1] if upcoming else events[:1]
+    return preview_events
+
+
+def latest_event_email_preview() -> str:
+    preview_events = get_preview_events()
     if not preview_events:
         return "<p>No events found on the source page.</p>"
     return format_email_html(preview_events)
@@ -298,6 +303,12 @@ def home():
         <div class="card">
           <h2>Most recent event email preview</h2>
           {{ preview_html|safe }}
+          <form method="post" action="{{ url_for('send_preview_email') }}">
+            {% if subscribe_secret_required %}
+              <input type="password" name="subscribe_secret" placeholder="Access code" required />
+            {% endif %}
+            <button type="submit" style="margin-top:0.75rem;">Send this preview</button>
+          </form>
         </div>
       </body>
     </html>
@@ -326,6 +337,28 @@ def subscribe():
     except Exception as exc:
         return redirect(url_for("home", error=str(exc)))
     return redirect(url_for("home", success=f"Added {email}"))
+
+
+@app.post("/send-preview")
+def send_preview_email():
+    subscribe_secret = os.getenv("SUBSCRIBE_SECRET")
+    if subscribe_secret and request.form.get("subscribe_secret", "") != subscribe_secret:
+        return redirect(url_for("home", error="Invalid access code."))
+
+    preview_events = get_preview_events()
+    if not preview_events:
+        return redirect(url_for("home", error="No preview events found on the source page."))
+
+    recipients = load_distribution_list()
+    if not recipients:
+        return redirect(url_for("home", error="Distribution list is empty. Add an email first."))
+
+    try:
+        send_email(recipients, preview_events)
+    except Exception as exc:
+        return redirect(url_for("home", error=f"Send failed: {exc}"))
+
+    return redirect(url_for("home", success=f"Sent preview email to {len(recipients)} recipient(s)."))
 
 
 @app.get("/api/health")
