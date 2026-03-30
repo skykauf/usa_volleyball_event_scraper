@@ -83,9 +83,10 @@ def kv_request(command: list[str]) -> list | str | int | None:
 
 
 def load_distribution_list() -> list[str]:
-    from_env = parse_recipient_emails(
-        os.getenv("REMINDER_EMAILS", "skylerkaufman@gmail.com")
-    )
+    raw_env = os.getenv("REMINDER_EMAILS", "").strip()
+    if not raw_env:
+        raw_env = "skylerkaufman@gmail.com"
+    from_env = parse_recipient_emails(raw_env)
     if not kv_enabled():
         return sorted(set(from_env))
 
