@@ -3,7 +3,7 @@ import json
 import os
 import re
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from email.utils import parseaddr
 from typing import Iterable
 
@@ -204,13 +204,27 @@ def parse_event_deadlines(page_text: str) -> list[EventDeadline]:
     return sorted(deduped.values(), key=lambda event: event.registration_deadline)
 
 
-def filter_upcoming_events(
-    events: list[EventDeadline], as_of: datetime | None = None
+def deadline_window_days() -> int:
+    """Calendar-day span after `as_of` date: deadline in [today, today+N] inclusive (default N=3)."""
+    raw = os.getenv("DEADLINE_WINDOW_DAYS", "3").strip()
+    try:
+        n = int(raw)
+    except ValueError:
+        return 3
+    return max(0, min(n, 60))
+
+
+def filter_events_deadline_in_window(
+    events: list[EventDeadline],
+    as_of: datetime | None = None,
+    window_days: int | None = None,
 ) -> list[EventDeadline]:
-    """Registration deadline on or after as_of date (UTC). Sorted by deadline."""
+    """Registration deadlines from today through today+window_days (UTC dates), inclusive."""
+    days = deadline_window_days() if window_days is None else window_days
     when = (as_of or datetime.now(UTC)).date()
-    upcoming = [e for e in events if e.registration_deadline.date() >= when]
-    return sorted(upcoming, key=lambda e: e.registration_deadline)
+    end = when + timedelta(days=days)
+    in_window = [e for e in events if when <= e.registration_deadline.date() <= end]
+    return sorted(in_window, key=lambda e: e.registration_deadline)
 
 
 def events_requiring_reminder(
@@ -259,7 +273,10 @@ def send_email(recipients: list[str], events: list[EventDeadline]) -> dict:
     # Default to Resend's onboarding test sender if EMAIL_FROM isn't set.
     # For production, set EMAIL_FROM to a verified sender/domain in Resend.
     from_email = os.getenv("EMAIL_FROM", "USAV Alerts <onboarding@resend.dev>")
-    subject = f"USAV registration reminder ({len(events)} upcoming tournament(s))"
+    subject = (
+        f"USAV registration reminder ({len(events)} tournament(s), "
+        f"deadlines in the next {deadline_window_days()} day window)"
+    )
     html_body = format_email_html(events)
     resend_api_key = get_env("RESEND_API_KEY")
     payload = {
@@ -295,23 +312,25 @@ def send_email(recipients: list[str], events: list[EventDeadline]) -> dict:
 
 
 def _preview_html_and_events() -> tuple[str, list[EventDeadline]]:
-    """Admin preview + test-send payload: all tournaments with registration deadline >= today (UTC)."""
+    """Admin preview + test-send: tournaments whose registration deadline is within the window (UTC)."""
     page_text = fetch_event_page_text()
     events = parse_event_deadlines(page_text)
-    upcoming = filter_upcoming_events(events)
+    n = deadline_window_days()
+    in_window = filter_events_deadline_in_window(events)
     if not events:
         return "<p>No events found on the source page.</p>", []
-    if not upcoming:
+    if not in_window:
         return (
-            "<p>No upcoming registration deadlines (all parsed deadlines are in the past).</p>",
+            "<p>No registration deadlines in the next "
+            f"{n} day window (today through today+{n} calendar days, UTC).</p>",
             [],
         )
     intro = (
         f'<p style="margin:0 0 0.75rem;color:#444;">'
-        f"{len(upcoming)} upcoming tournament(s) — deadlines on or after today (UTC), "
-        f"sorted by deadline.</p>"
+        f"{len(in_window)} tournament(s) with deadlines in the next {n} day window "
+        f"(today through today+{n} calendar days, UTC), sorted by deadline.</p>"
     )
-    return intro + format_email_html(upcoming), upcoming
+    return intro + format_email_html(in_window), in_window
 
 
 def get_preview_events() -> list[EventDeadline]:
@@ -388,7 +407,7 @@ def home():
         </div>
 
         <div class="card">
-          <h2>Email preview (all upcoming deadlines)</h2>
+          <h2>Email preview (deadlines in the next {{ deadline_window_days }} days)</h2>
           {{ preview_html|safe }}
           <form id="send-preview-form" method="post" action="{{ url_for('send_preview_email') }}">
             {% if subscribe_secret_required %}
@@ -445,6 +464,7 @@ def home():
         preview_html=preview_html,
         kv_enabled=kv_enabled(),
         subscribe_secret_required=subscribe_secret_required,
+        deadline_window_days=deadline_window_days(),
     )
 
 
@@ -507,7 +527,7 @@ def send_preview_email():
         return redirect(url_for("home", error=message))
 
     message = (
-        f"Sent preview ({len(preview_events)} upcoming tournament(s)) to "
+        f"Sent preview ({len(preview_events)} in next {deadline_window_days()}-day window) to "
         f"{len(recipients)} recipient(s)."
     )
     if wants_json:
@@ -552,13 +572,13 @@ def run_cron():
             }
         )
 
-    upcoming = filter_upcoming_events(parsed_events, now)
+    upcoming = filter_events_deadline_in_window(parsed_events, now)
     if not upcoming:
         return jsonify(
             {
                 "ok": True,
                 "sent": False,
-                "reason": "Reminder triggered but no upcoming deadlines to include in email",
+                "reason": "Reminder triggered but no deadlines in the configured window to include",
                 "reminder_triggers": [
                     {
                         "event_name": e.event_name,
