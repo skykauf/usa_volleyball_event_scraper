@@ -92,8 +92,10 @@ def load_distribution_list() -> list[str]:
 
     from_kv = kv_request(["SMEMBERS", KV_EMAIL_SET_KEY]) or []
     combined = {parseaddr(email)[1] for email in from_kv if parseaddr(email)[1]}
-    combined.update(from_env)
-    return sorted(combined)
+    # Treat REMINDER_EMAILS as a "seed" list only when KV is empty.
+    if not combined:
+        combined.update(from_env)
+    return sorted(set(combined))
 
 
 def add_email_to_distribution_list(email: str) -> None:
@@ -101,6 +103,22 @@ def add_email_to_distribution_list(email: str) -> None:
     if not normalized:
         raise RuntimeError("Please provide a valid email address.")
     kv_request(["SADD", KV_EMAIL_SET_KEY, normalized])
+
+
+def delete_email_from_distribution_list(email: str) -> int:
+    normalized = parseaddr(email.strip())[1]
+    if not normalized:
+        raise RuntimeError("Please provide a valid email address.")
+    removed = kv_request(["SREM", KV_EMAIL_SET_KEY, normalized])
+    if removed is None:
+        return 0
+    if isinstance(removed, (int, float)):
+        return int(removed)
+    # Upstash typically returns an integer, but be defensive.
+    try:
+        return int(str(removed))
+    except Exception:
+        return 0
 
 
 def extract_year(text: str, fallback_year: int) -> int:
@@ -308,7 +326,16 @@ def home():
           <h2>Current distribution list</h2>
           <ul>
             {% for email in recipients %}
-              <li>{{ email }}</li>
+              <li style="display:flex;align-items:center;justify-content:space-between;gap:1rem;">
+                <span>{{ email }}</span>
+                <form method="post" action="{{ url_for('delete_email') }}" style="margin:0;">
+                  <input type="hidden" name="email" value="{{ email }}" />
+                  {% if subscribe_secret_required %}
+                    <input type="password" name="subscribe_secret" placeholder="Access code" required />
+                  {% endif %}
+                  <button type="submit" onclick="return confirm('Remove this email from the list?')">Remove</button>
+                </form>
+              </li>
             {% endfor %}
           </ul>
         </div>
@@ -387,6 +414,25 @@ def subscribe():
     except Exception as exc:
         return redirect(url_for("home", error=str(exc)))
     return redirect(url_for("home", success=f"Added {email}"))
+
+
+@app.post("/delete-email")
+def delete_email():
+    subscribe_secret = os.getenv("SUBSCRIBE_SECRET")
+    if subscribe_secret and request.form.get("subscribe_secret", "") != subscribe_secret:
+        return redirect(url_for("home", error="Invalid access code."))
+    if not kv_enabled():
+        return redirect(url_for("home", error="Redis is not configured yet. Link Upstash in Vercel and redeploy."))
+
+    email = request.form.get("email", "").strip()
+    try:
+        removed_count = delete_email_from_distribution_list(email)
+    except Exception as exc:
+        return redirect(url_for("home", error=str(exc)))
+
+    if removed_count <= 0:
+        return redirect(url_for("home", error="Email not found in the Redis list."))
+    return redirect(url_for("home", success=f"Removed {email}"))
 
 
 @app.post("/send-preview")
