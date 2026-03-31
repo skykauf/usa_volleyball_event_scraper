@@ -2,6 +2,7 @@ import html
 import json
 import os
 import re
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from email.utils import parseaddr
@@ -13,6 +14,10 @@ from dateutil import parser as date_parser
 from flask import Flask, jsonify, redirect, render_template_string, request, url_for
 
 USAV_EVENTS_URL = "https://usavolleyball.org/beach-national-team/event-registration/"
+VIS_BASE_URL = "https://www.fivb.org/Vis2009/XmlRequest.asmx"
+VIS_WORLD_TOUR_FIELDS = (
+    "Position TeamName TeamFederationCode EarnedPointsTeam NoPlayer1 NoPlayer2"
+)
 
 
 @dataclass(frozen=True)
@@ -25,6 +30,10 @@ class EventDeadline:
 
 app = Flask(__name__)
 KV_EMAIL_SET_KEY = "usav:reminder_emails"
+_VIS_CACHE: dict[str, object] = {
+    "expires_at": datetime(1970, 1, 1, tzinfo=UTC),
+    "rows": [],
+}
 
 
 def get_env(name: str, default: str | None = None) -> str:
@@ -133,6 +142,131 @@ def fetch_event_page_text() -> str:
     response.raise_for_status()
     soup = BeautifulSoup(response.text, "html.parser")
     return soup.get_text("\n", strip=True)
+
+
+def _escape_attr(v: object) -> str:
+    return (
+        str(v)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
+def _build_vis_request_xml(request_type: str, attrs: dict[str, object]) -> str:
+    parts = [f'<Request Type="{_escape_attr(request_type)}"']
+    for key, value in attrs.items():
+        if value is None or value == "":
+            continue
+        parts.append(f' {key}="{_escape_attr(value)}"')
+    parts.append(" />")
+    # Old-style wrapper works reliably for these ranking endpoints.
+    return "<Requests>" + "".join(parts) + "</Requests>"
+
+
+def _xml_to_records(xml_text: str, node_tag: str) -> list[dict[str, object]]:
+    root = ET.fromstring(xml_text)
+    records: list[dict[str, object]] = []
+    for node in root.findall(f".//{node_tag}"):
+        rec: dict[str, object] = {}
+        if node.attrib:
+            rec.update(node.attrib)
+        for child in node:
+            if len(child) == 0 and child.text is not None:
+                rec[child.tag] = child.text.strip()
+            elif child.attrib:
+                rec[child.tag] = child.attrib
+        records.append(rec)
+    return records
+
+
+def vis_request_xml(
+    request_type: str, node_tag: str, attrs: dict[str, object]
+) -> list[dict[str, object]]:
+    body = _build_vis_request_xml(request_type, attrs)
+    resp = requests.post(
+        VIS_BASE_URL,
+        data=body.encode("utf-8"),
+        headers={
+            "User-Agent": "Mozilla/5.0 (compatible; USAV-Event-Scraper/1.0)",
+            "Content-Type": "application/xml; charset=utf-8",
+            "Accept": "application/xml",
+        },
+        timeout=30,
+    )
+    resp.raise_for_status()
+    text = resp.text or ""
+    if not text.strip():
+        return []
+    try:
+        return _xml_to_records(text, node_tag)
+    except ET.ParseError:
+        return []
+
+
+def _int_or_none(value: object) -> int | None:
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    try:
+        return int(float(s))
+    except (TypeError, ValueError):
+        return None
+
+
+def vis_cache_ttl_minutes() -> int:
+    raw = os.getenv("VIS_CACHE_TTL_MINUTES", "30").strip()
+    try:
+        v = int(raw)
+    except ValueError:
+        return 30
+    return max(1, min(v, 240))
+
+
+def fetch_usa_world_tour_rankings() -> list[dict[str, object]]:
+    now = datetime.now(UTC)
+    expires_at = _VIS_CACHE.get("expires_at")
+    if isinstance(expires_at, datetime) and now < expires_at:
+        rows = _VIS_CACHE.get("rows")
+        if isinstance(rows, list):
+            return rows
+
+    rows: list[dict[str, object]] = []
+    for gender in ("M", "W"):
+        records = vis_request_xml(
+            "GetBeachWorldTourRanking",
+            "BeachWorldTourRankingEntry",
+            {
+                "Gender": gender,
+                "Fields": VIS_WORLD_TOUR_FIELDS,
+            },
+        )
+        for rec in records:
+            if str(rec.get("TeamFederationCode", "")).upper() != "USA":
+                continue
+            rows.append(
+                {
+                    "gender": gender,
+                    "position": _int_or_none(rec.get("Position")),
+                    "earned_points": _int_or_none(rec.get("EarnedPointsTeam")),
+                    "team_name": rec.get("TeamName"),
+                    "no_player1": _int_or_none(rec.get("NoPlayer1")),
+                    "no_player2": _int_or_none(rec.get("NoPlayer2")),
+                }
+            )
+
+    rows.sort(
+        key=lambda r: (
+            -(r["earned_points"] if isinstance(r["earned_points"], int) else -1),
+            (r["position"] if isinstance(r["position"], int) else 10**9),
+        )
+    )
+    _VIS_CACHE["rows"] = rows
+    _VIS_CACHE["expires_at"] = now + timedelta(minutes=vis_cache_ttl_minutes())
+    return rows
 
 
 def parse_event_deadlines(page_text: str) -> list[EventDeadline]:
@@ -428,6 +562,12 @@ def home():
           <div id="send-preview-status" style="margin-top:0.75rem; min-height:1.2em;"></div>
         </div>
 
+        <div class="card">
+          <h2>USA player ranking points (VIS, lazy loaded)</h2>
+          <p id="usa-rankings-status" class="muted">Loading rankings...</p>
+          <div id="usa-rankings-container"></div>
+        </div>
+
         <script>
           (function() {
             const form = document.getElementById('send-preview-form');
@@ -461,6 +601,56 @@ def home():
                 if (btn) btn.disabled = false;
               }
             });
+          })();
+
+          (function() {
+            const status = document.getElementById('usa-rankings-status');
+            const container = document.getElementById('usa-rankings-container');
+            if (!status || !container) return;
+
+            function esc(v) {
+              return String(v ?? '')
+                .replaceAll('&', '&amp;')
+                .replaceAll('<', '&lt;')
+                .replaceAll('>', '&gt;')
+                .replaceAll('"', '&quot;');
+            }
+
+            function renderRows(rows) {
+              if (!rows || rows.length === 0) {
+                status.textContent = 'No USA rankings returned from VIS.';
+                return;
+              }
+              status.textContent = '';
+              const header = '<table style="width:100%;border-collapse:collapse;"><thead><tr>' +
+                '<th style="text-align:left;border-bottom:1px solid #ddd;padding:6px;">Gender</th>' +
+                '<th style="text-align:left;border-bottom:1px solid #ddd;padding:6px;">Position</th>' +
+                '<th style="text-align:left;border-bottom:1px solid #ddd;padding:6px;">Points</th>' +
+                '<th style="text-align:left;border-bottom:1px solid #ddd;padding:6px;">Team</th>' +
+                '</tr></thead><tbody>';
+              const body = rows.map(r =>
+                '<tr>' +
+                `<td style="padding:6px;border-bottom:1px solid #f0f0f0;">${esc(r.gender)}</td>` +
+                `<td style="padding:6px;border-bottom:1px solid #f0f0f0;">${esc(r.position ?? '')}</td>` +
+                `<td style="padding:6px;border-bottom:1px solid #f0f0f0;">${esc(r.earned_points ?? '')}</td>` +
+                `<td style="padding:6px;border-bottom:1px solid #f0f0f0;">${esc(r.team_name ?? '')}</td>` +
+                '</tr>'
+              ).join('');
+              container.innerHTML = header + body + '</tbody></table>';
+            }
+
+            fetch('/api/usa-rankings', { headers: { 'Accept': 'application/json' } })
+              .then(async (res) => {
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok || !data.ok) {
+                  throw new Error(data.error || 'Failed to load USA rankings.');
+                }
+                renderRows(data.rows || []);
+              })
+              .catch((err) => {
+                status.style.color = '#991b1b';
+                status.textContent = 'Failed to load USA rankings: ' + String(err);
+              });
           })();
         </script>
       </body>
@@ -561,6 +751,24 @@ def send_preview_email():
 @app.get("/api/health")
 def healthcheck():
     return jsonify({"ok": True, "service": "usa_volleyball_event_scraper"})
+
+
+@app.get("/api/usa-rankings")
+def usa_rankings():
+    try:
+        rows = fetch_usa_world_tour_rankings()
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+    return jsonify(
+        {
+            "ok": True,
+            "source": "vis",
+            "ranking_type": "beach_world_tour",
+            "country_code": "USA",
+            "row_count": len(rows),
+            "rows": rows,
+        }
+    )
 
 
 @app.get("/api/cron")
