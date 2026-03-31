@@ -564,6 +564,11 @@ def home():
 
         <div class="card">
           <h2>USA player ranking points (VIS, lazy loaded)</h2>
+          <div style="display:flex;gap:0.5rem;margin:0.5rem 0;">
+            <button type="button" id="usa-toggle-w" style="padding:0.35rem 0.65rem;">Women</button>
+            <button type="button" id="usa-toggle-m" style="padding:0.35rem 0.65rem;">Men</button>
+            <button type="button" id="usa-toggle-all" style="padding:0.35rem 0.65rem;">All</button>
+          </div>
           <p id="usa-rankings-status" class="muted">Loading rankings...</p>
           <div id="usa-rankings-container"></div>
         </div>
@@ -606,7 +611,12 @@ def home():
           (function() {
             const status = document.getElementById('usa-rankings-status');
             const container = document.getElementById('usa-rankings-container');
-            if (!status || !container) return;
+            const btnW = document.getElementById('usa-toggle-w');
+            const btnM = document.getElementById('usa-toggle-m');
+            const btnAll = document.getElementById('usa-toggle-all');
+            if (!status || !container || !btnW || !btnM || !btnAll) return;
+            let allRows = [];
+            let currentFilter = 'W';
 
             function esc(v) {
               return String(v ?? '')
@@ -616,9 +626,38 @@ def home():
                 .replaceAll('"', '&quot;');
             }
 
-            function renderRows(rows) {
-              if (!rows || rows.length === 0) {
+            function filteredRows() {
+              if (currentFilter === 'ALL') return allRows;
+              return allRows.filter(r => String(r.gender || '').toUpperCase() === currentFilter);
+            }
+
+            function paintToggleState() {
+              const activeBg = '#111';
+              const activeFg = '#fff';
+              const inactiveBg = '#fff';
+              const inactiveFg = '#111';
+              const setState = (btn, active) => {
+                btn.style.background = active ? activeBg : inactiveBg;
+                btn.style.color = active ? activeFg : inactiveFg;
+                btn.style.border = '1px solid #ccc';
+              };
+              setState(btnW, currentFilter === 'W');
+              setState(btnM, currentFilter === 'M');
+              setState(btnAll, currentFilter === 'ALL');
+            }
+
+            function renderRows() {
+              const rows = filteredRows();
+              if (!allRows || allRows.length === 0) {
                 status.textContent = 'No USA rankings returned from VIS.';
+                container.innerHTML = '';
+                return;
+              }
+              if (!rows || rows.length === 0) {
+                status.textContent = currentFilter === 'W'
+                  ? 'No USA women rankings returned from VIS.'
+                  : (currentFilter === 'M' ? 'No USA men rankings returned from VIS.' : 'No USA rankings returned from VIS.');
+                container.innerHTML = '';
                 return;
               }
               status.textContent = '';
@@ -639,13 +678,25 @@ def home():
               container.innerHTML = header + body + '</tbody></table>';
             }
 
+            function setFilter(nextFilter) {
+              currentFilter = nextFilter;
+              paintToggleState();
+              renderRows();
+            }
+
+            btnW.addEventListener('click', () => setFilter('W'));
+            btnM.addEventListener('click', () => setFilter('M'));
+            btnAll.addEventListener('click', () => setFilter('ALL'));
+            paintToggleState();
+
             fetch('/api/usa-rankings', { headers: { 'Accept': 'application/json' } })
               .then(async (res) => {
                 const data = await res.json().catch(() => ({}));
                 if (!res.ok || !data.ok) {
                   throw new Error(data.error || 'Failed to load USA rankings.');
                 }
-                renderRows(data.rows || []);
+                allRows = Array.isArray(data.rows) ? data.rows : [];
+                renderRows();
               })
               .catch((err) => {
                 status.style.color = '#991b1b';
