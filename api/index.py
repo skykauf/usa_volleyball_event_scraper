@@ -16,8 +16,9 @@ from flask import Flask, jsonify, redirect, render_template_string, request, url
 USAV_EVENTS_URL = "https://usavolleyball.org/beach-national-team/event-registration/"
 VIS_BASE_URL = "https://www.fivb.org/Vis2009/XmlRequest.asmx"
 VIS_WORLD_TOUR_FIELDS = (
-    "Position TeamName TeamFederationCode EarnedPointsTeam NoPlayer1 NoPlayer2"
+    "Position TeamName TeamFederationCode EarnedPointsTeam EarnedPointsPlayer NoPlayer1 NoPlayer2"
 )
+VIS_PLAYER_FIELDS = "No FirstName LastName FederationCode Gender"
 
 
 @dataclass(frozen=True)
@@ -30,10 +31,15 @@ class EventDeadline:
 
 app = Flask(__name__)
 KV_EMAIL_SET_KEY = "usav:reminder_emails"
-_VIS_CACHE: dict[str, object] = {
+_VIS_TEAM_CACHE: dict[str, object] = {
     "expires_at": datetime(1970, 1, 1, tzinfo=UTC),
     "rows": [],
 }
+_VIS_PLAYER_CACHE: dict[str, object] = {
+    "expires_at": datetime(1970, 1, 1, tzinfo=UTC),
+    "rows": [],
+}
+_VIS_PLAYER_NAME_CACHE: dict[int, str] = {}
 
 
 def get_env(name: str, default: str | None = None) -> str:
@@ -228,9 +234,9 @@ def vis_cache_ttl_minutes() -> int:
 
 def fetch_usa_world_tour_rankings() -> list[dict[str, object]]:
     now = datetime.now(UTC)
-    expires_at = _VIS_CACHE.get("expires_at")
+    expires_at = _VIS_TEAM_CACHE.get("expires_at")
     if isinstance(expires_at, datetime) and now < expires_at:
-        rows = _VIS_CACHE.get("rows")
+        rows = _VIS_TEAM_CACHE.get("rows")
         if isinstance(rows, list):
             return rows
 
@@ -264,8 +270,86 @@ def fetch_usa_world_tour_rankings() -> list[dict[str, object]]:
             (r["position"] if isinstance(r["position"], int) else 10**9),
         )
     )
-    _VIS_CACHE["rows"] = rows
-    _VIS_CACHE["expires_at"] = now + timedelta(minutes=vis_cache_ttl_minutes())
+    _VIS_TEAM_CACHE["rows"] = rows
+    _VIS_TEAM_CACHE["expires_at"] = now + timedelta(minutes=vis_cache_ttl_minutes())
+    return rows
+
+
+def _player_display_name(player_id: int | None) -> str:
+    if player_id is None:
+        return ""
+    cached = _VIS_PLAYER_NAME_CACHE.get(player_id)
+    if cached is not None:
+        return cached
+    records = vis_request_xml(
+        "GetPlayer",
+        "Player",
+        {"No": player_id, "Fields": VIS_PLAYER_FIELDS},
+    )
+    if not records:
+        _VIS_PLAYER_NAME_CACHE[player_id] = str(player_id)
+        return str(player_id)
+    rec = records[0]
+    first = str(rec.get("FirstName", "") or "").strip()
+    last = str(rec.get("LastName", "") or "").strip()
+    full = (first + " " + last).strip() or str(player_id)
+    _VIS_PLAYER_NAME_CACHE[player_id] = full
+    return full
+
+
+def fetch_usa_world_tour_player_rankings() -> list[dict[str, object]]:
+    now = datetime.now(UTC)
+    expires_at = _VIS_PLAYER_CACHE.get("expires_at")
+    if isinstance(expires_at, datetime) and now < expires_at:
+        rows = _VIS_PLAYER_CACHE.get("rows")
+        if isinstance(rows, list):
+            return rows
+
+    by_player: dict[tuple[int, str], dict[str, object]] = {}
+    for gender in ("M", "W"):
+        records = vis_request_xml(
+            "GetBeachWorldTourRanking",
+            "BeachWorldTourRankingEntry",
+            {"Gender": gender, "Fields": VIS_WORLD_TOUR_FIELDS},
+        )
+        for rec in records:
+            if str(rec.get("TeamFederationCode", "")).upper() != "USA":
+                continue
+            player_points = _int_or_none(rec.get("EarnedPointsPlayer"))
+            team_name = rec.get("TeamName")
+            team_position = _int_or_none(rec.get("Position"))
+            for player_key in ("NoPlayer1", "NoPlayer2"):
+                pid = _int_or_none(rec.get(player_key))
+                if pid is None:
+                    continue
+                k = (pid, gender)
+                prev = by_player.get(k)
+                candidate = {
+                    "gender": gender,
+                    "player_id": pid,
+                    "player_name": _player_display_name(pid),
+                    "entry_ranking_points": player_points,
+                    "team_name": team_name,
+                    "team_position": team_position,
+                }
+                if prev is None:
+                    by_player[k] = candidate
+                else:
+                    prev_points = prev.get("entry_ranking_points")
+                    prev_points_int = prev_points if isinstance(prev_points, int) else -1
+                    cand_points_int = player_points if isinstance(player_points, int) else -1
+                    if cand_points_int > prev_points_int:
+                        by_player[k] = candidate
+
+    rows = list(by_player.values())
+    rows.sort(
+        key=lambda r: (
+            -(r["entry_ranking_points"] if isinstance(r["entry_ranking_points"], int) else -1),
+            str(r.get("player_name", "")),
+        )
+    )
+    _VIS_PLAYER_CACHE["rows"] = rows
+    _VIS_PLAYER_CACHE["expires_at"] = now + timedelta(minutes=vis_cache_ttl_minutes())
     return rows
 
 
@@ -406,9 +490,9 @@ def format_email_html(events: list[EventDeadline]) -> str:
 def send_email(recipients: list[str], events: list[EventDeadline]) -> dict:
     if not events:
         raise RuntimeError("Refusing to send email with zero tournaments in the body.")
-    # Default to Resend's onboarding test sender if EMAIL_FROM isn't set.
-    # For production, set EMAIL_FROM to a verified sender/domain in Resend.
-    from_email = os.getenv("EMAIL_FROM", "USAV Alerts <onboarding@resend.dev>")
+    # Require an explicit verified sender so production never falls back to
+    # Resend's onboarding address by accident.
+    from_email = get_env("EMAIL_FROM")
     subject = (
         f"USAV registration reminder ({len(events)} tournament(s), "
         f"deadlines in the next {deadline_window_days()} day window)"
@@ -563,7 +647,7 @@ def home():
         </div>
 
         <div class="card">
-          <h2>USA player ranking points (VIS, lazy loaded)</h2>
+          <h2>USA player entry ranking points (VIS, lazy loaded)</h2>
           <div style="display:flex;gap:0.5rem;margin:0.5rem 0;">
             <button type="button" id="usa-toggle-w" style="padding:0.35rem 0.65rem;">Women</button>
             <button type="button" id="usa-toggle-m" style="padding:0.35rem 0.65rem;">Men</button>
@@ -663,16 +747,18 @@ def home():
               status.textContent = '';
               const header = '<table style="width:100%;border-collapse:collapse;"><thead><tr>' +
                 '<th style="text-align:left;border-bottom:1px solid #ddd;padding:6px;">Gender</th>' +
-                '<th style="text-align:left;border-bottom:1px solid #ddd;padding:6px;">Position</th>' +
-                '<th style="text-align:left;border-bottom:1px solid #ddd;padding:6px;">Points</th>' +
+                '<th style="text-align:left;border-bottom:1px solid #ddd;padding:6px;">Player</th>' +
+                '<th style="text-align:left;border-bottom:1px solid #ddd;padding:6px;">Entry Points</th>' +
                 '<th style="text-align:left;border-bottom:1px solid #ddd;padding:6px;">Team</th>' +
+                '<th style="text-align:left;border-bottom:1px solid #ddd;padding:6px;">Team Pos</th>' +
                 '</tr></thead><tbody>';
               const body = rows.map(r =>
                 '<tr>' +
                 `<td style="padding:6px;border-bottom:1px solid #f0f0f0;">${esc(r.gender)}</td>` +
-                `<td style="padding:6px;border-bottom:1px solid #f0f0f0;">${esc(r.position ?? '')}</td>` +
-                `<td style="padding:6px;border-bottom:1px solid #f0f0f0;">${esc(r.earned_points ?? '')}</td>` +
+                `<td style="padding:6px;border-bottom:1px solid #f0f0f0;">${esc(r.player_name ?? '')}</td>` +
+                `<td style="padding:6px;border-bottom:1px solid #f0f0f0;">${esc(r.entry_ranking_points ?? '')}</td>` +
                 `<td style="padding:6px;border-bottom:1px solid #f0f0f0;">${esc(r.team_name ?? '')}</td>` +
+                `<td style="padding:6px;border-bottom:1px solid #f0f0f0;">${esc(r.team_position ?? '')}</td>` +
                 '</tr>'
               ).join('');
               container.innerHTML = header + body + '</tbody></table>';
@@ -807,7 +893,7 @@ def healthcheck():
 @app.get("/api/usa-rankings")
 def usa_rankings():
     try:
-        rows = fetch_usa_world_tour_rankings()
+        rows = fetch_usa_world_tour_player_rankings()
     except Exception as exc:
         return jsonify({"ok": False, "error": str(exc)}), 500
     return jsonify(
@@ -815,6 +901,7 @@ def usa_rankings():
             "ok": True,
             "source": "vis",
             "ranking_type": "beach_world_tour",
+            "entity": "player",
             "country_code": "USA",
             "row_count": len(rows),
             "rows": rows,

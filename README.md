@@ -35,7 +35,7 @@ Vercel links:
 
 Set these in Vercel Project Settings -> Environment Variables:
 
-- `EMAIL_FROM` - verified sender (e.g. `USAV Alerts <alerts@yourdomain.com>`)
+- `EMAIL_FROM` - verified sender (e.g. `USAV Alerts <usav_alerts@skylerkaufman.com>`)
 - `REMINDER_EMAILS` - comma-separated list of recipients
   - seed/default list if KV is empty or unavailable
 - `SEND_HOUR_UTC` - **optional**; only for **hourly** (or frequent) crons — restrict sends to this UTC hour (0–23). Omit for **daily** cron.
@@ -63,15 +63,11 @@ More context: [Redis on Vercel](https://vercel.com/docs/storage/vercel-kv/usage-
 
 1. Create account: https://resend.com
 2. Get API key: https://resend.com/api-keys
-3. For immediate testing, use:
-   - `EMAIL_FROM=USAV Alerts <onboarding@resend.dev>`
-   - recipient must be your Resend account email while in test mode
-4. For production recipients, add and verify your domain in Resend:
+3. Add and verify your domain in Resend:
    - https://resend.com/domains
-   - then set `EMAIL_FROM` to that verified domain address
-5. In Vercel project env vars, set:
+4. In Vercel project env vars, set:
    - `RESEND_API_KEY=<your key>`
-   - `EMAIL_FROM=<verified sender>`
+   - `EMAIL_FROM=USAV Alerts <usav_alerts@skylerkaufman.com>`
    - `REMINDER_EMAILS=skylerkaufman@gmail.com`
    - `CRON_SECRET=<random secret>`
    - Redis vars from Marketplace (see **Add Redis** above) — usually `UPSTASH_REDIS_REST_*`
@@ -84,7 +80,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
 export RESEND_API_KEY="re_your_api_key_here"
-export EMAIL_FROM="USAV Alerts <onboarding@resend.dev>"
+export EMAIL_FROM="USAV Alerts <usav_alerts@skylerkaufman.com>"
 export REMINDER_EMAILS="skylerkaufman@gmail.com"
 export CRON_SECRET=your-secret
 export UPSTASH_REDIS_REST_URL="https://....upstash.io"
