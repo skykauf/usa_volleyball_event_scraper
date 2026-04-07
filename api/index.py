@@ -1,7 +1,9 @@
 import html
 import json
+import logging
 import os
 import re
+import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -33,6 +35,14 @@ class EventDeadline:
 
 
 app = Flask(__name__)
+log = logging.getLogger(__name__)
+log.setLevel(logging.INFO)
+if not log.handlers:
+    _h = logging.StreamHandler()
+    _h.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
+    _h.setLevel(logging.INFO)
+    log.addHandler(_h)
+log.propagate = False
 KV_EMAIL_SET_KEY = "usav:reminder_emails"
 _VIS_TEAM_CACHE: dict[str, object] = {
     "expires_at": datetime(1970, 1, 1, tzinfo=UTC),
@@ -475,7 +485,15 @@ def events_requiring_reminder(
 
 def email_sending_configured() -> bool:
     """Resend API key required; EMAIL_FROM falls back to DEFAULT_EMAIL if unset."""
-    return bool((os.getenv("RESEND_API_KEY") or "").strip())
+    raw = (os.getenv("RESEND_API_KEY") or "").strip()
+    ok = bool(raw)
+    log.info(
+        "email_sending_configured: ok=%s key_len=%s EMAIL_FROM_env_set=%s",
+        ok,
+        len(raw) if raw else 0,
+        bool((os.getenv("EMAIL_FROM") or "").strip()),
+    )
+    return ok
 
 
 def format_email_html(events: list[EventDeadline]) -> str:
@@ -496,46 +514,109 @@ def format_email_html(events: list[EventDeadline]) -> str:
 
 
 def send_email(recipients: list[str], events: list[EventDeadline]) -> dict:
+    log.info(
+        "send_email: enter recipient_count=%s recipients=%s event_count=%s",
+        len(recipients),
+        recipients,
+        len(events),
+    )
     if not events:
+        log.error("send_email: abort zero events")
         raise RuntimeError("Refusing to send email with zero tournaments in the body.")
     # Override with EMAIL_FROM in env for a verified domain/sender in Resend.
     from_email = (os.getenv("EMAIL_FROM") or "").strip() or DEFAULT_EMAIL
+    env_from_set = bool((os.getenv("EMAIL_FROM") or "").strip())
     subject = (
         f"USAV registration reminder ({len(events)} tournament(s), "
         f"deadlines in the next {deadline_window_days()} day window)"
     )
     html_body = format_email_html(events)
+    log.info(
+        "send_email: from=%r (EMAIL_FROM_env=%s DEFAULT_EMAIL_fallback=%s) subject=%r",
+        from_email,
+        env_from_set,
+        not env_from_set,
+        subject,
+    )
+    for i, ev in enumerate(events):
+        log.info(
+            "send_email: event[%s] name=%r deadline=%s dates_raw=%r",
+            i,
+            ev.event_name,
+            ev.registration_deadline.isoformat(),
+            ev.event_dates_raw,
+        )
+    log.info(
+        "send_email: html_body_chars=%s html_preview=%r",
+        len(html_body),
+        html_body[:400] + ("…" if len(html_body) > 400 else ""),
+    )
     resend_api_key = get_env("RESEND_API_KEY")
+    log.info(
+        "send_email: RESEND_API_KEY len=%s (value not logged)",
+        len(resend_api_key),
+    )
     payload = {
         "from": from_email,
         "to": recipients,
         "subject": subject,
         "html": html_body,
     }
-    response = requests.post(
-        "https://api.resend.com/emails",
-        headers={
-            "Authorization": f"Bearer {resend_api_key}",
-            "Content-Type": "application/json",
-        },
-        data=json.dumps(payload),
-        timeout=30,
+    payload_json = json.dumps(payload)
+    log.info("send_email: POST https://api.resend.com/emails json_bytes=%s", len(payload_json))
+    t0 = time.monotonic()
+    try:
+        response = requests.post(
+            "https://api.resend.com/emails",
+            headers={
+                "Authorization": f"Bearer {resend_api_key}",
+                "Content-Type": "application/json",
+            },
+            data=payload_json,
+            timeout=30,
+        )
+    except requests.RequestException as exc:
+        elapsed_ms = int((time.monotonic() - t0) * 1000)
+        log.exception(
+            "send_email: requests error after %sms: %s",
+            elapsed_ms,
+            exc,
+        )
+        raise
+    elapsed_ms = int((time.monotonic() - t0) * 1000)
+    log.info(
+        "send_email: response status=%s elapsed_ms=%s content_length=%s",
+        response.status_code,
+        elapsed_ms,
+        response.headers.get("Content-Length", "?"),
+    )
+    log.info(
+        "send_email: response body (first 800 chars)=%r",
+        (response.text or "")[:800],
     )
     try:
         response.raise_for_status()
-    except requests.HTTPError as exc:
-        # Show Resend's actual response body to make debugging (403/etc.) easy.
+    except requests.HTTPError:
         try:
             details = response.json()
         except Exception:
             details = (response.text or "").strip()
+        log.error(
+            "send_email: HTTP error status=%s details=%r",
+            response.status_code,
+            details,
+        )
         message = f"Resend error {response.status_code}: {details}"
         raise RuntimeError(message) from None
 
     try:
-        return {"provider": "resend", "response": response.json()}
+        out = {"provider": "resend", "response": response.json()}
+        log.info("send_email: success parsed_json=%s", out)
+        return out
     except Exception:
-        return {"provider": "resend", "response_text": (response.text or "").strip()}
+        out = {"provider": "resend", "response_text": (response.text or "").strip()}
+        log.info("send_email: success non-json body=%r", out.get("response_text", ""))
+        return out
 
 
 def _preview_html_and_events() -> tuple[str, list[EventDeadline]]:
@@ -868,9 +949,15 @@ def send_preview_email():
     if not recipients:
         return redirect(url_for("home", error="Distribution list is empty. Add an email first."))
 
+    log.info(
+        "send_preview_email: calling send_email recipients=%s preview_event_count=%s",
+        recipients,
+        len(preview_events),
+    )
     try:
         send_email(recipients, preview_events)
     except Exception as exc:
+        log.exception("send_preview_email: send_email failed")
         message = f"Send failed: {exc}"
         if wants_json:
             return jsonify({"ok": False, "error": message}), 500
@@ -981,7 +1068,14 @@ def run_cron():
         )
 
     recipients = load_distribution_list()
+    log.info(
+        "run_cron: sending email reminder_triggers=%s in_window=%s recipients=%s",
+        len(reminder_triggers),
+        len(in_window),
+        recipients,
+    )
     email_result = send_email(recipients, in_window)
+    log.info("run_cron: send_email finished result_keys=%s", list(email_result.keys()))
     return jsonify(
         {
             "ok": True,
