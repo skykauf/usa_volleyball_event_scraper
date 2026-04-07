@@ -20,6 +20,9 @@ VIS_WORLD_TOUR_FIELDS = (
 )
 VIS_PLAYER_FIELDS = "No FirstName LastName FederationCode Gender"
 
+# Seed recipients (when REMINDER_EMAILS is unset) and Resend "from" when EMAIL_FROM is unset.
+DEFAULT_EMAIL = "usav_alerts@skylerkaufman.com"
+
 
 @dataclass(frozen=True)
 class EventDeadline:
@@ -100,7 +103,7 @@ def kv_request(command: list[str]) -> list | str | int | None:
 def load_distribution_list() -> list[str]:
     raw_env = os.getenv("REMINDER_EMAILS", "").strip()
     if not raw_env:
-        raw_env = "skylerkaufman@gmail.com"
+        raw_env = DEFAULT_EMAIL
     from_env = parse_recipient_emails(raw_env)
     if not kv_enabled():
         return sorted(set(from_env))
@@ -470,6 +473,11 @@ def events_requiring_reminder(
     return due
 
 
+def email_sending_configured() -> bool:
+    """Resend API key required; EMAIL_FROM falls back to DEFAULT_EMAIL if unset."""
+    return bool((os.getenv("RESEND_API_KEY") or "").strip())
+
+
 def format_email_html(events: list[EventDeadline]) -> str:
     rows = []
     for event in events:
@@ -490,9 +498,8 @@ def format_email_html(events: list[EventDeadline]) -> str:
 def send_email(recipients: list[str], events: list[EventDeadline]) -> dict:
     if not events:
         raise RuntimeError("Refusing to send email with zero tournaments in the body.")
-    # Require an explicit verified sender so production never falls back to
-    # Resend's onboarding address by accident.
-    from_email = get_env("EMAIL_FROM")
+    # Override with EMAIL_FROM in env for a verified domain/sender in Resend.
+    from_email = (os.getenv("EMAIL_FROM") or "").strip() or DEFAULT_EMAIL
     subject = (
         f"USAV registration reminder ({len(events)} tournament(s), "
         f"deadlines in the next {deadline_window_days()} day window)"
@@ -947,6 +954,24 @@ def run_cron():
                 "ok": True,
                 "sent": False,
                 "reason": "No events due for reminder at this hour",
+                "events_found": len(parsed_events),
+                "window_days": n,
+                "deadlines_in_window": len(in_window),
+                "send_hour_utc": os.getenv("SEND_HOUR_UTC", "").strip()
+                or None,
+            }
+        )
+
+    if not email_sending_configured():
+        return jsonify(
+            {
+                "ok": True,
+                "sent": False,
+                "reason": (
+                    "Email not configured: set RESEND_API_KEY "
+                    "(Vercel → Project → Settings → Environment Variables), then redeploy. "
+                    f"Optional: EMAIL_FROM (defaults to {DEFAULT_EMAIL} if unset)."
+                ),
                 "events_found": len(parsed_events),
                 "window_days": n,
                 "deadlines_in_window": len(in_window),
